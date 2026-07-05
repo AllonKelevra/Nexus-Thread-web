@@ -5,6 +5,7 @@ import {
   hideBackButton,
   onBackButtonClick,
   offBackButtonClick,
+  retrieveLaunchParams,
 } from '@telegram-apps/sdk-react';
 import { useQuery } from '@tanstack/react-query';
 import Twemoji from 'react-twemoji';
@@ -15,9 +16,10 @@ import { ThemeColorsProvider } from './providers/ThemeColorsProvider';
 import { WebSocketProvider } from './providers/WebSocketProvider';
 import { ToastProvider } from './components/Toast';
 import { TooltipProvider } from './components/primitives/Tooltip';
-import { isInTelegramWebApp } from './hooks/useTelegramSDK';
+import { isInTelegramWebApp, closeTelegramApp } from './hooks/useTelegramSDK';
 import { getFallbackParentPath } from './utils/navigation';
 import { subscriptionApi } from './api/subscription';
+import { useBlockingStore } from './store/blocking';
 import { NexusThreadBackground, useCustomDesignMode } from './custom/design';
 
 const TWEMOJI_OPTIONS = { className: 'twemoji', folder: 'svg', ext: '.svg' } as const;
@@ -44,6 +46,13 @@ function TelegramBackButton() {
   navigateRef.current = navigate;
   const pathnameRef = useRef(location.pathname);
   pathnameRef.current = location.pathname;
+
+  // A full-screen blocking overlay (maintenance / channel-sub / blacklist /
+  // account-deleted / backend-unavailable) takes over the native back button:
+  // there is nowhere to navigate, so it becomes a single, stable EXIT control.
+  const blockingType = useBlockingStore((state) => state.blockingType);
+  const blockingTypeRef = useRef(blockingType);
+  blockingTypeRef.current = blockingType;
 
   // Reliable in-app navigation depth (the app's entry point is 0). Driven by
   // React Router's navigation TYPE — NOT window.history.state.idx, which the
@@ -90,6 +99,15 @@ function TelegramBackButton() {
   subsCountRef.current = subsCount;
 
   useEffect(() => {
+    // On a blocking overlay, keep exactly one visible Back button (its click
+    // exits the app — see handler). Skip the route logic so it can't flip
+    // between Back and Close as the hidden route changes underneath.
+    if (blockingType) {
+      try {
+        showBackButton();
+      } catch {}
+      return;
+    }
     const isTopLevel = location.pathname === '' || BOTTOM_NAV_PATHS.includes(location.pathname);
     // Depth-independent on purpose: whether the user deep-linked in or navigated
     // here in-app, a single-tariff detail whose list just bounces back has no
@@ -104,10 +122,17 @@ function TelegramBackButton() {
         showBackButton();
       }
     } catch {}
-  }, [location, listRedirectsToDetail]);
+  }, [location, listRedirectsToDetail, blockingType]);
 
   // Stable handler — ref prevents re-subscription on every render
   const handler = useCallback(() => {
+    // A blocking overlay is a hard block with nowhere to navigate — the back
+    // button's only job is to EXIT the Mini App (no SPA navigation, so it can't
+    // flip-flop between Back and Close).
+    if (blockingTypeRef.current) {
+      closeTelegramApp();
+      return;
+    }
     // Real in-app history (depth > 0): a normal back. Otherwise we were opened
     // directly on this route via a deep-link — navigate(-1) is a no-op, so fall
     // back to a sensible parent route instead.
@@ -149,6 +174,44 @@ function TelegramBackButton() {
   return null;
 }
 
+/** `admin_ticket_<id>` startapp param → /admin/tickets/<id>. */
+const ADMIN_TICKET_START_PARAM_RE = /^admin_ticket_(\d+)$/;
+
+/**
+ * Routes a Telegram Mini App start param to an in-app destination on launch.
+ *
+ * Admin ticket notification buttons in GROUP/channel chats open the cabinet via
+ * a `t.me/<bot>/<app>?startapp=admin_ticket_<id>` deep link (bot issue #2988) —
+ * `web_app` buttons don't work in group chats, so the startapp param is the only
+ * way in. Telegram delivers it as `tgWebAppStartParam`; we map it to the admin
+ * ticket route once on mount. Access is still gated by the route's
+ * `PermissionRoute permission="tickets:read"`.
+ */
+function StartParamNavigator() {
+  const navigate = useNavigate();
+  const handled = useRef(false);
+
+  useEffect(() => {
+    if (handled.current) return;
+    handled.current = true;
+
+    let startParam: string | undefined;
+    try {
+      startParam = retrieveLaunchParams().tgWebAppStartParam;
+    } catch {
+      return;
+    }
+    if (!startParam) return;
+
+    const match = ADMIN_TICKET_START_PARAM_RE.exec(startParam);
+    if (match) {
+      navigate(`/admin/tickets/${match[1]}`, { replace: true });
+    }
+  }, [navigate]);
+
+  return null;
+}
+
 function CustomDesignBootstrap() {
   const { data } = useCustomDesignMode();
   return data?.enabled ? <NexusThreadBackground /> : null;
@@ -161,6 +224,7 @@ export function AppWithNavigator() {
     <BrowserRouter>
       <CustomDesignBootstrap />
       {isTelegram && <TelegramBackButton />}
+      {isTelegram && <StartParamNavigator />}
       <ErrorBoundary level="page">
         <PlatformProvider>
           <ThemeColorsProvider>

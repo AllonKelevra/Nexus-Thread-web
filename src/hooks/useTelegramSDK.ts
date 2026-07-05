@@ -67,6 +67,15 @@ export function getTelegramInitData(): string | null {
   }
 }
 
+export function closeTelegramApp(): void {
+  try {
+    const telegramWindow = window as Window & {
+      Telegram?: { WebApp?: { close?: () => void } };
+    };
+    telegramWindow.Telegram?.WebApp?.close?.();
+  } catch {}
+}
+
 function isDarkHexColor(hex: string): boolean {
   const m = hex.replace('#', '');
   const full = m.length === 3 ? m.replace(/(.)/g, '$1$1') : m;

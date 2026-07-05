@@ -135,6 +135,7 @@ export interface PurchaseStatus {
   recipient_in_bot: boolean | null;
   bot_link: string | null;
   is_claimable?: boolean;
+  claim_url?: string | null;
   bot_claim_link?: string | null;
 }
 
